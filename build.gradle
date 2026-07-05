@@ -1,0 +1,23 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.saksham4106'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+
+    implementation("commons-io:commons-io:2.16.1")
+
+    implementation 'tools.jackson.core:jackson-databind:3.2.0'
+}
+
+test {
+    useJUnitPlatform()
+}
