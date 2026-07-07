@@ -182,18 +182,16 @@ public class Debugger {
                     }
 
                 }
-
+                System.out.print(location.lineNumber() + " -> ");
                 Serializer.start(varState);
 
-//                System.out.print(location.lineNumber() + " -> ");
             }
 
             if (event instanceof VMDeathEvent || event instanceof VMDisconnectEvent) {
-                System.out.println(functionArgs.entrySet().stream()
-                        .map(entry -> entry.getKey() + " -> " + entry.getValue())
-                        .collect(Collectors.joining("\n   ", "{\n   ", "\n}")));
-                System.out.println(callStack);
-                System.out.println(returnStack);
+                Serializer.start(functionArgs);
+                Serializer.start(callStack);
+                Serializer.start(returnStack);
+
 
                 return false;
             }

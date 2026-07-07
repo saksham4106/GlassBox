@@ -5,7 +5,7 @@ import tools.jackson.databind.ObjectMapper;
 
 public class Serializer {
 
-    public static void start(VariableStateMap map){
+    public static void start(Object map){
         ObjectMapper mapper = new ObjectMapper();
         String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(map);
         System.out.println(json);
