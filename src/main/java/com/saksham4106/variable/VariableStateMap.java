@@ -5,10 +5,14 @@ import java.util.List;
 
 public class VariableStateMap {
 
+    private final int lineNumber;
+    private final String frameID;
     private final List<VariableState> variableStates;
 
-    public VariableStateMap(){
+    public VariableStateMap(int lineNumber, String frameID){
         variableStates = new ArrayList<>();
+        this.lineNumber = lineNumber;
+        this.frameID = frameID;
     }
 
     public void addVariable(VariableState variableState){
@@ -23,4 +27,11 @@ public class VariableStateMap {
         return variableStates;
     }
 
+    public int getLineNumber() {
+        return lineNumber;
+    }
+
+    public String getFrameID() {
+        return frameID;
+    }
 }

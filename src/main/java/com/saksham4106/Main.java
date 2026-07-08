@@ -25,7 +25,7 @@ public class Main {
             }
             file.deleteOnExit();
         }else{
-            path = "code/QuickSortVisualizer.java";
+            path = "code/Solution.java";
             file = new File(path);
         }
 

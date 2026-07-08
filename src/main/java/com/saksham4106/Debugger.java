@@ -1,42 +1,37 @@
 package com.saksham4106;
 
 import com.saksham4106.serialization.Serializer;
-import com.saksham4106.variable.VariableState;
-import com.saksham4106.variable.VariableStateMap;
 import com.saksham4106.variable.VariableValue;
-import com.saksham4106.variable.values.CollectionValue;
-import com.saksham4106.variable.values.MapValue;
-import com.saksham4106.variable.values.ObjectValue;
-import com.saksham4106.variable.values.PrimitiveVarValue;
+import com.saksham4106.variable.values.*;
 import com.sun.jdi.*;
 import com.sun.jdi.connect.Connector;
 import com.sun.jdi.connect.LaunchingConnector;
 import com.sun.jdi.event.*;
 import com.sun.jdi.request.*;
 import org.apache.commons.io.FilenameUtils;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class Debugger {
 
+    record VarKey(String frameID, LocalVariable var) {}
+
     private final String clazz;
     private final String classPath;
-
     private long counter = 0;
 
+
+    Map<VarKey, Integer> hashes = new HashMap<>();
     Map<Integer, String> frameIdMap = new HashMap<>();
-    Map<String, List<VariableState>> functionArgs = new HashMap<>();
-
-    List<Pair<String, String>> callStack = new ArrayList<>();
-    List<Pair<String, VariableValue>> returnStack = new ArrayList<>();
-
     private VirtualMachine vm;
-    public Debugger(String path){
+
+    public Debugger(String path) {
         clazz = FilenameUtils.getBaseName(path);
         classPath = Path.of(path).getParent().toString();
     }
@@ -51,7 +46,6 @@ public class Debugger {
         args.get("options").setValue("-cp " + classPath);
 
         vm = connector.launch(args);
-//        vm.resume();
 
         this.setupIOStream();
 
@@ -74,56 +68,83 @@ public class Debugger {
 
         }
     }
-
+    String currentFrameId = null;
     private boolean eventLoop(EventQueue queue) throws Exception{
-
         EventSet events = queue.remove();
+
         for(Event event : events) {
-            if(event instanceof VMStartEvent){
-                System.out.println("Virtual Machine started");
-            }
-
-            if(event instanceof ClassPrepareEvent cpe){
-                ReferenceType referenceType = cpe.referenceType();
-
-                List<Method> methods = referenceType.methodsByName("main");
-                Method main =  methods.get(0);
-                Location loc = main.locationOfCodeIndex(0);
-
-                EventRequestManager eventRequestManager = vm.eventRequestManager();
-                BreakpointRequest bpRequest = eventRequestManager.createBreakpointRequest(loc);
-                bpRequest.enable();
-
-            }
 
             if(event instanceof MethodEntryEvent me){
                 ThreadReference thread = me.thread();
                 Method currMethod = me.method();
-
+                StackFrame frame = thread.frame(0);
 
                 String parentCall = null;
 
-                if(thread.frameCount() > 1){
-                    StackFrame frame = thread.frame(1);
-                    Method parentCallMethod = frame.location().method();
-
-                    if(parentCallMethod.name().equals(currMethod.name())){
-                        parentCall = frameIdMap.get(thread.frameCount() - 1);
-                    }
-                }
+                if(thread.frameCount() > 1) parentCall = frameIdMap.get(thread.frameCount() - 1);
 
                 String currCall = currMethod.name() + "_" + counter++;
-                StackFrame frame = thread.frame(0);
+                currentFrameId = currCall;
+
                 frameIdMap.put(thread.frameCount(), currCall);
+
+                ObjectNode argsNode = Serializer.mapper.createObjectNode();
 
                 for(LocalVariable arg: currMethod.arguments()){
                     Value val = frame.getValue(arg);
-                    functionArgs.computeIfAbsent(currCall, k -> new ArrayList<>()).add(
-                            new VariableState(arg.name(), parseValue(val, 1, thread)));
+                    VariableValue argValue = parseValue(val, 1, thread);
+
+                    VarKey key = new VarKey(currentFrameId, arg);
+                    JsonNode varNode = Serializer.mapper.valueToTree(argValue);
+                    argsNode.set(arg.name(), varNode);
+
+                    hashes.put(key, varNode.hashCode());
                 }
 
-                callStack.add(new Pair<>(parentCall, currCall));
+                ObjectNode pushCall = Serializer.mapper.createObjectNode();
+                pushCall.put("type", "push_frame");
+                pushCall.put("frame", currCall);
+                pushCall.put("parent", parentCall);
+                pushCall.set("args", argsNode);
 
+                System.out.println(Serializer.serialize(pushCall));
+            }
+
+
+            if(event instanceof StepEvent se){
+                Location location = se.location();
+                ThreadReference thread = se.thread();
+                StackFrame frame = thread.frame(0);
+
+                List<LocalVariable> visibleVariables = frame.visibleVariables();
+                Map<LocalVariable, Value> visibleVals = frame.getValues(visibleVariables);
+
+                ObjectNode varStateNode = Serializer.mapper.createObjectNode();
+
+                for (Map.Entry<LocalVariable, Value> entry : visibleVals.entrySet()) {
+                    LocalVariable var = entry.getKey();
+                    Value val = entry.getValue();
+
+                    if(val != null) {
+                        VariableValue parsedValue = parseValue(val, 1, thread);
+                        JsonNode node = Serializer.mapper.valueToTree(parsedValue);
+                        int newHash = node.hashCode();
+
+                        VarKey key = new VarKey(currentFrameId, var);
+                        Integer oldHash = hashes.get(key);
+                        if(oldHash == null || oldHash != newHash) {
+                            varStateNode.set(var.name(), node);
+                            hashes.put(key, newHash);
+                        }
+                    }
+                }
+
+                ObjectNode payload = Serializer.mapper.createObjectNode();
+                payload.put("line", location.lineNumber() - 1);
+                payload.put("frameId", currentFrameId);
+                payload.set("varState", varStateNode);
+
+                System.out.println(Serializer.serialize(payload));
             }
 
             if(event instanceof MethodExitEvent me){
@@ -132,70 +153,35 @@ public class Debugger {
 
                 String callId = frameIdMap.get(currentDepth);
 
+                if(currentDepth > 0){
+                    currentFrameId = frameIdMap.get(currentDepth - 1);
+                }
+
                 if(callId != null){
                     Value returnVal = me.returnValue();
                     VariableValue parsedReturn = parseValue(returnVal, 1, thread);
-                    returnStack.add(new Pair<>(callId, parsedReturn));
+
+                    ObjectNode returnNode = Serializer.mapper.createObjectNode();
+                    returnNode.put("type", "pop");
+                    returnNode.put("frame", callId);
+                    returnNode.set("return",  Serializer.mapper.valueToTree(parsedReturn));
+
+                    System.out.println(Serializer.serialize(returnNode));
                 }
             }
 
+
+            if (event instanceof VMDeathEvent || event instanceof VMDisconnectEvent) return false;
+
+            if(event instanceof ClassPrepareEvent cpe) setBreakpointAtMain(cpe);
+
             if(event instanceof BreakpointEvent bpe){
-                System.out.println("set breakpoint at " + bpe.location());
                 ThreadReference thread = bpe.thread();
                 enableStep(vm, thread);
             }
-
-
-            if(event instanceof StepEvent se){
-                Location location = se.location();
-                ThreadReference thread = se.thread();
-
-                StackFrame frame = thread.frame(0);
-                List<LocalVariable> vars = frame.visibleVariables();
-
-                Map<LocalVariable, Value> vals = frame.getValues(vars);
-
-                VariableStateMap varState = new VariableStateMap();
-
-                for (Map.Entry<LocalVariable, Value> entry : vals.entrySet()) {
-                    LocalVariable var = entry.getKey();
-                    Value val = entry.getValue();
-
-//                    if(val instanceof PrimitiveValue priv){
-//
-//                        pair = Pair.of(priv.type().name(), priv.toString());
-//                    }else if(val instanceof StringReference stringRef){
-//
-//                        pair = Pair.of(stringRef.type().name(), stringRef.toString());
-//                    }else if(val instanceof ArrayReference arrayRef){
-//
-//                        pair = Pair.of(arrayRef.type().name(), arrayRef.getValues().toString());
-//                            HAVE TO DO THIS TO STOP SYSTEM.ERR FROM GOING MAD
-//                            System.out.println();
-//                            System.out.println(arrayRef.type().name() + ": " + arrayRef.getValues());
-//                    }else if(val instanceof ObjectReference objectRef){
-//
-//                        pair = evalObjectReference(objectRef, 10);
-//                    }
-                    if(val != null) {
-                        varState.addVariable(var.name(), parseValue(val, 1, thread));
-                    }
-
-                }
-                System.out.print(location.lineNumber() + " -> ");
-                Serializer.start(varState);
-
-            }
-
-            if (event instanceof VMDeathEvent || event instanceof VMDisconnectEvent) {
-                Serializer.start(functionArgs);
-                Serializer.start(callStack);
-                Serializer.start(returnStack);
-
-
-                return false;
-            }
         }
+
+
         events.resume();
         return true;
     }
@@ -213,6 +199,10 @@ public class Debugger {
             "java.lang.Boolean", "boolean");
 
 
+    Set<String> primitiveArrays = Set.of(
+            "int", "long", "short", "byte", "char", "boolean", "float", "double", "java.lang.String"
+    );
+
     Map<String, List<String>> parseMap = new HashMap<>();
 
 
@@ -229,9 +219,19 @@ public class Debugger {
         }
 
         if(val instanceof ArrayReference arrayRef){
+            ArrayType arrayType = (ArrayType) arrayRef.type();
+            String arrComponentName = arrayType.componentTypeName();
+
             int length = Math.min(lengthLimit, arrayRef.length());
             List<Value> values = arrayRef.getValues(0, length);
             List<VariableValue> li = values.stream().map(v -> parseValue(v, depth + 1, thread)).toList();
+
+
+            if(primitiveArrays.contains(arrComponentName)){
+                List<String> elements = values.stream().map(v -> v != null ? v.toString() : "null").toList();
+                return new PrimitiveArrayValue(type, elements);
+            }
+
             return new CollectionValue(type, li);
         }
 
@@ -290,6 +290,9 @@ public class Debugger {
                                 VariableValue valueValue = parseValue(valueVal, depth + 1, thread);
                                 entries.add(new MapValue.MapEntry(keyValue, valueValue));
                             }
+
+                            // potentially expensive
+                            entries.sort(Comparator.comparing(a -> Serializer.serialize(a.keyValue())));
 
                             return new MapValue(type, entries);
                         } else {
@@ -382,5 +385,18 @@ public class Debugger {
 
 
         stepRequest.enable();
+    }
+
+    private void setBreakpointAtMain(ClassPrepareEvent cpe){
+        ReferenceType referenceType = cpe.referenceType();
+
+        List<Method> methods = referenceType.methodsByName("main");
+        Method main =  methods.getFirst();
+        Location loc = main.locationOfCodeIndex(0);
+
+        EventRequestManager eventRequestManager = vm.eventRequestManager();
+        BreakpointRequest bpRequest = eventRequestManager.createBreakpointRequest(loc);
+        bpRequest.enable();
+
     }
 }
