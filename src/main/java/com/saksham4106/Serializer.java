@@ -1,4 +1,4 @@
-package com.saksham4106.serialization;
+package com.saksham4106;
 
 import tools.jackson.databind.ObjectMapper;
 

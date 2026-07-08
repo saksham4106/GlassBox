@@ -29,6 +29,9 @@ public class Main {
             file = new File(path);
         }
 
+        Parser parser = new Parser();
+        path = parser.load(path);
+
         Compiler compiler = new Compiler();
         if(compiler.compile(path)){
 

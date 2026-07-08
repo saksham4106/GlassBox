@@ -1,6 +1,5 @@
 package com.saksham4106;
 
-import com.saksham4106.serialization.Serializer;
 import com.saksham4106.variable.VariableValue;
 import com.saksham4106.variable.values.*;
 import com.sun.jdi.*;
@@ -20,15 +19,21 @@ import java.util.*;
 
 public class Debugger {
 
-    record VarKey(String frameID, LocalVariable var) {}
+    record LocalVarKey(String frameID, LocalVariable var) {}
+    record InstanceFieldKey(Long objectID, String fieldName){}
+    record StaticFieldKey(String classID, String fieldName){}
 
     private final String clazz;
     private final String classPath;
     private long counter = 0;
 
 
-    Map<VarKey, Integer> hashes = new HashMap<>();
+    Map<LocalVarKey, Integer> localHashes = new HashMap<>();
+    Map<InstanceFieldKey, Integer> instanceHashes = new HashMap<>();
+    Map<StaticFieldKey, Integer> staticHashes = new HashMap<>();
     Map<Integer, String> frameIdMap = new HashMap<>();
+
+    Set<LocalVarKey> lastSeen = new HashSet<>();
     private VirtualMachine vm;
 
     public Debugger(String path) {
@@ -94,11 +99,11 @@ public class Debugger {
                     Value val = frame.getValue(arg);
                     VariableValue argValue = parseValue(val, 1, thread);
 
-                    VarKey key = new VarKey(currentFrameId, arg);
+                    LocalVarKey key = new LocalVarKey(currentFrameId, arg);
                     JsonNode varNode = Serializer.mapper.valueToTree(argValue);
                     argsNode.set(arg.name(), varNode);
 
-                    hashes.put(key, varNode.hashCode());
+                    localHashes.put(key, varNode.hashCode());
                 }
 
                 ObjectNode pushCall = Serializer.mapper.createObjectNode();
@@ -124,27 +129,75 @@ public class Debugger {
                 for (Map.Entry<LocalVariable, Value> entry : visibleVals.entrySet()) {
                     LocalVariable var = entry.getKey();
                     Value val = entry.getValue();
+                    LocalVarKey key = new LocalVarKey(currentFrameId, var);
 
                     if(val != null) {
                         VariableValue parsedValue = parseValue(val, 1, thread);
                         JsonNode node = Serializer.mapper.valueToTree(parsedValue);
                         int newHash = node.hashCode();
 
-                        VarKey key = new VarKey(currentFrameId, var);
-                        Integer oldHash = hashes.get(key);
+                        Integer oldHash = localHashes.get(key);
                         if(oldHash == null || oldHash != newHash) {
                             varStateNode.set(var.name(), node);
-                            hashes.put(key, newHash);
+                            localHashes.put(key, newHash);
                         }
                     }
                 }
 
-                ObjectNode payload = Serializer.mapper.createObjectNode();
-                payload.put("line", location.lineNumber() - 1);
-                payload.put("frameId", currentFrameId);
-                payload.set("varState", varStateNode);
+                ObjectNode varState = Serializer.mapper.createObjectNode();
+                varState.put("type", "local");
+                varState.put("line", location.lineNumber());
+                varState.put("frameId", currentFrameId);
+                varState.set("varState", varStateNode);
 
-                System.out.println(Serializer.serialize(payload));
+                System.out.println(Serializer.serialize(varState));
+
+                ObjectNode fieldStateNode = Serializer.mapper.createObjectNode();
+                fieldStateNode.put("type", "global");
+
+                ObjectReference thisPointer = frame.thisObject();
+                if(thisPointer != null) {
+                    long thisID = thisPointer.uniqueID();
+
+                    for(Field f: thisPointer.referenceType().fields()){
+                        if(f.isStatic()) continue;
+
+                        VariableValue val = parseValue(thisPointer.getValue(f), 1, thread);
+                        JsonNode node = Serializer.mapper.valueToTree(val);
+                        int newHash = node.hashCode();
+
+                        InstanceFieldKey key = new InstanceFieldKey(thisID, f.name());
+                        Integer oldHash = instanceHashes.get(key);
+
+                        if(oldHash == null || oldHash != newHash) {
+                            fieldStateNode.set(f.name(), node);
+                            instanceHashes.put(key, newHash);
+                        }
+                    }
+                }
+
+                ReferenceType staticReference = frame.location().declaringType();
+                String className = staticReference.name();
+
+                for(Field f: staticReference.fields()){
+                    if(!f.isStatic()) continue;
+
+                    VariableValue val = parseValue(staticReference.getValue(f), 1, thread);
+                    JsonNode node = Serializer.mapper.valueToTree(val);
+                    int newHash = node.hashCode();
+
+                    StaticFieldKey key = new StaticFieldKey(className, f.name());
+                    Integer oldHash = staticHashes.get(key);
+                    if(oldHash == null || oldHash != newHash) {
+                        fieldStateNode.set(f.name(), node);
+                        staticHashes.put(key, newHash);
+                    }
+                }
+
+                if(fieldStateNode.size() > 1){
+
+                    System.out.println(Serializer.serialize(fieldStateNode));
+                }
             }
 
             if(event instanceof MethodExitEvent me){
@@ -164,6 +217,7 @@ public class Debugger {
                     ObjectNode returnNode = Serializer.mapper.createObjectNode();
                     returnNode.put("type", "pop");
                     returnNode.put("frame", callId);
+                    returnNode.put("line", thread.frame(currentDepth-1).location().lineNumber() - 1);
                     returnNode.set("return",  Serializer.mapper.valueToTree(parsedReturn));
 
                     System.out.println(Serializer.serialize(returnNode));
@@ -243,11 +297,25 @@ public class Debugger {
                     return new PrimitiveVarValue(boxed.get(type), obj.getValue(valueField).toString());
                 }
             }else{
-                if(type.equals("java.util.ArrayList")){
-                    Field elementsField = obj.referenceType().fieldByName("elementData");
-                    Field sizeField = obj.referenceType().fieldByName("size");
+                if(type.equals("java.util.ArrayList") || type.equals("java.util.Arrays$ArrayList")){
 
-                    int size = Math.min(lengthLimit, ((PrimitiveValue) obj.getValue(sizeField)).intValue());
+                    Field elementsField = obj.referenceType().fieldByName("elementData");
+                    int size = lengthLimit;
+                    try{
+                        Field sizeField = obj.referenceType().fieldByName("size");
+                        size = ((PrimitiveValue) obj.getValue(sizeField)).intValue();
+                    }catch (Exception e){
+                        try{
+                            Method sizeMethod = obj.referenceType().methodsByName("size").get(0);
+                            Value v = obj.invokeMethod(thread, sizeMethod, new ArrayList<>(), ObjectReference.INVOKE_SINGLE_THREADED);
+                            size = ((PrimitiveValue) v).intValue();
+
+                        }catch(Exception ignored){}
+                    }
+                    System.out.println(size);
+                    size = Math.min(lengthLimit, size);
+
+
                     ArrayReference elementArray = (ArrayReference) obj.getValue(elementsField);
 
                     List<Value> elements = elementArray.getValues(0, size);

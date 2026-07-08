@@ -16,6 +16,7 @@ dependencies {
     implementation("commons-io:commons-io:2.16.1")
 
     implementation 'tools.jackson.core:jackson-databind:3.2.0'
+    implementation 'com.github.javaparser:javaparser-symbol-solver-core:3.28.2'
 }
 
 test {
